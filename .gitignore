@@ -25,6 +25,11 @@ config/privacy.json
 # Media downloaded from LINE
 media/
 
+# Python relay artifacts
+__pycache__/
+*.pyc
+.line-connector-macos-relay.state
+
 # Logs
 *.log
 npm-debug.log*

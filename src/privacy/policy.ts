@@ -61,6 +61,39 @@ export function evaluateCapture(conversationId: string, config: PrivacyConfig): 
 }
 
 /**
+ * Consent decision for data the operator supplied about themselves —
+ * an imported export, or their own forwarded notifications.
+ *
+ * The allow list is skipped here on purpose. It exists to stop a webhook
+ * silently recording strangers who message an Official Account. Forwarding
+ * your own notifications, or importing your own export, is a per-device
+ * decision the person already made explicitly; asking them to also opt in
+ * chat-by-chat would be friction with no safety gain.
+ *
+ * The kill switch and the deny list still apply, so there is always a way to
+ * stop everything, and a way to exclude one specific conversation.
+ */
+export function evaluateSelfCapture(
+  conversationId: string,
+  config: PrivacyConfig,
+): CaptureDecision {
+  const { capture } = config;
+
+  if (!capture.enabled) {
+    return { store: false, storeText: 'none', reason: 'capture disabled (kill switch)' };
+  }
+  if (capture.deny.includes(conversationId)) {
+    return { store: false, storeText: 'none', reason: 'conversation is on the deny list' };
+  }
+
+  return {
+    store: true,
+    storeText: capture.storeText,
+    reason: 'operator-supplied data (import or notification relay)',
+  };
+}
+
+/**
  * Decides whether the model may read a captured conversation.
  *
  * `mcp.readable === null` means "anything that was captured". Setting it to an

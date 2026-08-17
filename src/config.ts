@@ -17,9 +17,17 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 
+/**
+ * A conversation identifier.
+ *
+ * U/R/C are LINE's own prefixes for users, rooms and chats. X is this
+ * project's prefix for a conversation imported from a LINE chat export, which
+ * carries no LINE-issued id — the rest is derived deterministically from the
+ * chat name so re-importing the same chat lands in the same conversation.
+ */
 const lineIdSchema = z
   .string()
-  .regex(/^[URC][0-9a-f]{32}$/, 'must be a LINE id: U/R/C followed by 32 hex chars');
+  .regex(/^[URCX][0-9a-f]{32}$/, 'must be a conversation id: U/R/C/X followed by 32 hex chars');
 
 const captureSchema = z
   .object({

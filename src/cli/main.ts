@@ -31,9 +31,11 @@ import { Store } from '../db/index.js';
 import { generateKeyHex } from '../privacy/crypto.js';
 import { defaultEnabledRules, RULE_NAMES } from '../privacy/redact.js';
 import { sweepRetention } from '../privacy/retention.js';
+import { importExport } from '../import/importer.js';
+import { parseLineExport } from '../import/lineExport.js';
 import { formatTimestamp, renderTranscript } from '../mcp/render.js';
 
-const LINE_ID = /^[URC][0-9a-f]{32}$/;
+const LINE_ID = /^[URCX][0-9a-f]{32}$/;
 
 function configPath(): string {
   return resolve(process.env.LINE_CONNECTOR_CONFIG ?? 'config/privacy.json');
@@ -55,6 +57,8 @@ function main(): void {
       return cmdConsent('allow', args[0]);
     case 'deny':
       return cmdConsent('deny', args[0]);
+    case 'import':
+      return cmdImport(args);
     case 'forget':
       return cmdForget(args[0]);
     case 'purge':
@@ -89,10 +93,19 @@ Consent
 
 Data
   status               Show the policy in force and what is currently stored
+  import <file>        Import a LINE chat-export .txt (see options below)
   export <handle>      Print one conversation as a transcript
   purge                Run the retention sweep now
   forget <lineId>      Erase everything for one user or group, permanently
   audit [n]            Show the last n access-log entries (default 20)
+
+Import options
+  --me <name>          Your display name in the export, so your own messages
+                       are marked as sent rather than received
+  --title <name>       Override the chat name (needed if the header is missing)
+  --retain-days <n>    Retention for this chat. Defaults to 0 (keep forever),
+                       because imported history is usually older than the
+                       global retention window and would be purged at once.
 
 Conversation ids look like U or C followed by 32 hex characters. Find them with
 \`conversations\`, or in the LINE Developers console.`,
@@ -274,6 +287,129 @@ function cmdConversations(): void {
   store.close();
 }
 
+/**
+ * Imports a LINE chat-export file.
+ *
+ * This is the only route to a personal conversation: the Messaging API cannot
+ * see personal chats, so an export produced by the LINE app is the data
+ * source. Everything imported goes through the same redaction and encryption
+ * as webhook traffic.
+ */
+function cmdImport(args: string[]): void {
+  const flags = parseFlags(args);
+  const file = flags.positional[0];
+
+  if (file === undefined) {
+    console.error('Usage: import <file.txt> [--me <name>] [--title <name>] [--retain-days <n>]');
+    process.exit(1);
+  }
+
+  let content: string;
+  try {
+    content = readFileSync(resolve(file), 'utf8');
+  } catch (err) {
+    console.error(`Could not read ${file}: ${(err as Error).message}`);
+    process.exit(1);
+  }
+
+  const config = loadPrivacyConfig();
+  const store = openStore({ create: true });
+
+  const parsed = parseLineExport(content);
+  if (parsed.messages.length === 0) {
+    console.error(
+      `No messages found in ${file}.\n\nExpected a LINE chat export: open a chat in LINE, then Settings → Export chat history. If this is such a file, it may use a layout this parser does not recognise — the first few lines would help.`,
+    );
+    store.close();
+    process.exit(1);
+  }
+
+  const selfLabels = flags.me === undefined ? [] : [flags.me];
+  const result = importExport(store, config, parsed, {
+    selfLabels,
+    ...(flags.title !== undefined ? { title: flags.title } : {}),
+  });
+
+  console.log(`Imported "${result.title}" (${result.sourceType})`);
+  console.log(`  conversation id: ${result.conversationId}`);
+  console.log(`  messages added:  ${result.imported}`);
+  if (result.duplicates > 0) {
+    console.log(`  already present: ${result.duplicates} (re-import is safe, nothing duplicated)`);
+  }
+  if (result.redacted > 0) {
+    console.log(`  redacted:        ${result.redacted} message(s) had content removed`);
+  }
+  if (result.skipped > 0) {
+    console.log(`  unparsed lines:  ${result.skipped}`);
+  }
+  if (result.earliest !== null && result.latest !== null) {
+    console.log(`  covering:        ${formatTimestamp(result.earliest)} → ${formatTimestamp(result.latest)}`);
+  }
+
+  console.log(`\n  participants: ${result.senders.join(', ') || '(none detected)'}`);
+  if (flags.me === undefined) {
+    console.log(
+      '  All messages were recorded as received. Re-run with --me "<your name>"\n  to mark your own messages as sent.',
+    );
+  }
+
+  // Imported history is usually older than the global retention window, so
+  // without an override the next sweep would delete everything just imported.
+  const retainDays = flags.retainDays ?? 0;
+  const path = configPath();
+  config.retention.perConversationDays[result.conversationId] = retainDays;
+  writeConfig(path, config);
+
+  console.log(
+    `\n  retention: ${
+      retainDays === 0 ? 'kept indefinitely' : `${retainDays} days`
+    } (written to ${path})`,
+  );
+  if (retainDays === 0 && config.retention.days > 0) {
+    console.log(
+      `  The global retention of ${config.retention.days} days would otherwise have purged this\n  history on the next sweep. Change it with --retain-days if that is not what you want.`,
+    );
+  }
+
+  store.close();
+}
+
+interface Flags {
+  positional: string[];
+  me?: string;
+  title?: string;
+  retainDays?: number;
+}
+
+function parseFlags(args: string[]): Flags {
+  const flags: Flags = { positional: [] };
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string;
+    switch (arg) {
+      case '--me':
+        flags.me = args[++i];
+        break;
+      case '--title':
+        flags.title = args[++i];
+        break;
+      case '--retain-days': {
+        const value = Number.parseInt(args[++i] ?? '', 10);
+        if (!Number.isInteger(value) || value < 0) {
+          console.error('--retain-days expects a whole number of days (0 means keep forever)');
+          process.exit(1);
+        }
+        flags.retainDays = value;
+        break;
+      }
+      default:
+        flags.positional.push(arg);
+    }
+  }
+
+  return flags;
+}
+
 function cmdExport(handle: string | undefined): void {
   if (handle === undefined) {
     console.error('Usage: export <handle|lineId>');
@@ -373,13 +509,18 @@ function cmdForget(lineId: string | undefined): void {
 
 // -- shared -------------------------------------------------------------------
 
-function openStore(): Store {
+function openStore(options: { create?: boolean } = {}): Store {
   const secrets = loadSecrets();
   if (secrets.encryptionKey === null) {
     console.error(
       'LINE_CONNECTOR_KEY is not set. The message store is encrypted and cannot be opened without it.\n\nIf this is a first run, generate one with:  npm run cli -- init',
     );
     process.exit(1);
+  }
+  // Import can be the first thing anyone runs, so it creates the store rather
+  // than insisting the webhook server has recorded something first.
+  if (options.create === true) {
+    return new Store(databasePath(), secrets.encryptionKey);
   }
   if (!existsSync(databasePath())) {
     console.error(

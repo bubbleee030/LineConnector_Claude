@@ -8,24 +8,68 @@ through MCP as read-only tools with per-call limits and an audit log.
 
 ## Read this before you start
 
-**This cannot read your personal LINE chats.** There is no API for that, from
-LINE or anyone else. The Messaging API only works for a LINE **Official
-Account** — a business/bot account — and only sees messages that people send
-*to that account*. Your own conversations with friends are not reachable
-programmatically, and the LINE Notify service that used to offer a sliver of
-this was shut down in 2025.
+There are two ways messages get in, and they cover different things.
 
-**There is also no chat history.** LINE pushes each message once, by webhook,
-as it happens. There is no "fetch the last 200 messages" endpoint. The ingest
-server has to be running *before* a conversation happens for there to be any
-record of it. Nothing that arrived before you set this up can be recovered.
+### Live capture — Official Account only
 
-So what this is actually good for: you have (or create) a LINE Official
-Account, people message it, and you want Claude to help you read, search and
-reason over that inbox — without handing a third party a copy of everyone's
-messages.
+**There is no API that reads your personal LINE chats.** The Messaging API
+works only for a LINE **Official Account** — a business/bot account — and only
+sees messages people send *to that account*. Your own conversations with
+friends are not reachable programmatically, LINE Login returns only your
+profile, and LINE Notify was shut down in 2025. Anything claiming otherwise is
+a reverse-engineered client logging in as you, which gets accounts permanently
+banned.
 
-If that is not what you wanted, stop here rather than working around it.
+**Live capture also has no history.** LINE pushes each message once, by
+webhook, as it happens; there is no "fetch the last 200 messages" endpoint. The
+ingest server must be running *before* a conversation happens for there to be
+any record of it.
+
+### Notification capture — personal chats, without a read receipt
+
+Reading a personal chat any other way marks it read — the sender sees 已讀 —
+because you have to open the chat. **Notifications don't.** Your device already
+receives the notification; a small relay forwards it to this connector, and
+reading a notification never sends anything back to LINE.
+
+This is the closest thing to "read them like an API" for personal chats:
+messages arrive as events, near-real-time, structured. How well it works depends
+on your OS, because you are asking the operating system for the notification,
+not LINE:
+
+| Platform | Works? | How |
+|---|---|---|
+| Android | ✅ cleanly | `NotificationListenerService` via a no-code automation app |
+| Windows | ✅ | `UserNotificationListener` helper |
+| macOS | ⚠️ | read the Notification Center database (script included) |
+| iOS | ❌ standalone | sandbox forbids it; works via a Mac that mirrors the iPhone |
+
+Full per-platform setup, and an honest account of why iOS is the exception, is
+in **[docs/PLATFORMS.md](./docs/PLATFORMS.md)**. The relay contract is in
+**[docs/RELAY.md](./docs/RELAY.md)**.
+
+The catch: a notification is a *preview*. Long messages truncate, media shows as
+`[Photo]`, and a chat that's already open posts nothing. Every such row is
+marked `fidelity: preview` so nothing overstates what it holds. It's an
+excellent running log, not a perfect archive.
+
+### Import — full text of a specific thread
+
+When you want a chat's complete history rather than previews, LINE's own export
+is the way in. In any chat → menu → **Settings → Export chat history** produces
+a `.txt`:
+
+```bash
+npm run cli -- import ~/Downloads/chat.txt --me "Your Name"
+```
+
+This does open the chat (so it marks that thread read once), but it gets you the
+full text, back as far as the export reaches. A chat captured live by
+notification and later backfilled from an export merge into one conversation.
+
+All three paths — webhook, notification, import — flow into the same encrypted
+store with the same redaction and retention, and Claude reads them through the
+same tools.
 
 ---
 

@@ -16,8 +16,9 @@ import type { PrivacyConfig } from '../config.js';
 import type { Store } from '../db/index.js';
 import type { LineClient } from '../line/client.js';
 import type { IngestAction } from '../line/normalize.js';
-import { evaluateCapture } from '../privacy/policy.js';
+import { evaluateCapture, evaluateSelfCapture } from '../privacy/policy.js';
 import { redact } from '../privacy/redact.js';
+import type { NormalizedMessage } from '../types.js';
 import { isMediaMessage, storeMedia } from './media.js';
 
 export type Outcome =
@@ -122,6 +123,53 @@ export async function processAction(
     text: storedText,
     redactions,
     originalTextLength: originalText?.length ?? 0,
+  });
+
+  return { outcome: inserted ? 'stored' : 'duplicate' };
+}
+
+/**
+ * Stores a message relayed from a phone notification.
+ *
+ * Separate from {@link processAction} because the consent model differs: this
+ * is the operator's own device forwarding their own notifications, so the
+ * allow list does not apply (see `evaluateSelfCapture`). Redaction, encryption
+ * and retention are identical.
+ */
+export function processNotification(
+  message: NormalizedMessage,
+  ctx: PipelineContext,
+): PipelineOutcome {
+  const decision = evaluateSelfCapture(message.conversationId, ctx.config);
+  if (!decision.store) {
+    return { outcome: 'dropped-by-policy', reason: decision.reason };
+  }
+
+  let storedText: string | null = null;
+  let redactions: string[] = [];
+
+  switch (decision.storeText) {
+    case 'none':
+      redactions = ['storeText:none'];
+      break;
+    case 'full':
+      storedText = message.text;
+      break;
+    case 'redacted': {
+      const result = redact(message.text ?? '', ctx.config);
+      storedText = result.text;
+      redactions = result.applied;
+      break;
+    }
+  }
+
+  ctx.store.upsertConversation(message.conversationId, message.sourceType, Date.now());
+
+  const inserted = ctx.store.insertMessage({
+    message,
+    text: storedText,
+    redactions,
+    originalTextLength: message.text?.length ?? 0,
   });
 
   return { outcome: inserted ? 'stored' : 'duplicate' };

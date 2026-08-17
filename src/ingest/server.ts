@@ -29,21 +29,34 @@ import { Store } from '../db/index.js';
 import { LineClient } from '../line/client.js';
 import { extractEvents, normalizeEvent } from '../line/normalize.js';
 import { verifySignature } from '../line/signature.js';
+import { safeEqual } from '../privacy/crypto.js';
 import { startRetentionSweeper } from '../privacy/retention.js';
-import { processAction, type Outcome, type PipelineContext } from './pipeline.js';
+import { normalizeNotification } from './notify.js';
+import {
+  processAction,
+  processNotification,
+  type Outcome,
+  type PipelineContext,
+} from './pipeline.js';
 
 /** LINE webhook bodies are small; anything larger is not from LINE. */
 const MAX_BODY_BYTES = 1024 * 1024;
 
 const WEBHOOK_PATH = process.env.LINE_CONNECTOR_WEBHOOK_PATH ?? '/webhook';
+const NOTIFY_PATH = process.env.LINE_CONNECTOR_NOTIFY_PATH ?? '/notify';
 
 function main(): void {
   const config = loadPrivacyConfig();
   const secrets = loadSecrets();
 
-  if (secrets.channelSecret === null) {
+  // Either intake may be used on its own: an Official Account webhook, a
+  // phone notification relay, or both. Requiring the LINE channel secret
+  // unconditionally would block the notification-only setup, which is the
+  // one that works for personal chats.
+  const notifySecret = process.env.LINE_CONNECTOR_NOTIFY_SECRET?.trim() ?? null;
+  if (secrets.channelSecret === null && notifySecret === null) {
     fail(
-      'LINE_CHANNEL_SECRET is not set. Without it, webhook signatures cannot be verified and anyone could post fake messages to this endpoint.',
+      'Neither intake is configured. Set LINE_CHANNEL_SECRET to receive Official Account webhooks, or LINE_CONNECTOR_NOTIFY_SECRET to receive relayed phone notifications, or both.',
     );
   }
   if (secrets.encryptionKey === null) {
@@ -80,7 +93,7 @@ function main(): void {
   });
 
   const server = createServer((req, res) => {
-    handleRequest(req, res, ctx, secrets.channelSecret as string).catch((err: unknown) => {
+    handleRequest(req, res, ctx, secrets.channelSecret).catch((err: unknown) => {
       console.error('[ingest] unhandled error:', (err as Error).message);
       if (!res.headersSent) respond(res, 500, 'internal error');
     });
@@ -88,8 +101,12 @@ function main(): void {
 
   const port = ingestPort();
   server.listen(port, () => {
-    console.log(`[ingest] listening on http://127.0.0.1:${port}${WEBHOOK_PATH}`);
-    printPolicySummary(config);
+    const intakes: string[] = [];
+    if (secrets.channelSecret !== null) intakes.push(`${WEBHOOK_PATH} (Official Account webhook)`);
+    if (notifySecret !== null) intakes.push(`${NOTIFY_PATH} (phone notification relay)`);
+    console.log(`[ingest] listening on http://127.0.0.1:${port}`);
+    console.log(`[ingest] intakes: ${intakes.join(', ')}`);
+    printPolicySummary(config, { notifyEnabled: notifySecret !== null });
   });
 
   const shutdown = (): void => {
@@ -107,7 +124,7 @@ async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   ctx: PipelineContext,
-  channelSecret: string,
+  channelSecret: string | null,
 ): Promise<void> {
   const url = req.url ?? '/';
 
@@ -118,8 +135,18 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'POST' && url.startsWith(NOTIFY_PATH)) {
+    await handleNotification(req, res, ctx);
+    return;
+  }
+
   if (req.method !== 'POST' || !url.startsWith(WEBHOOK_PATH)) {
     respond(res, 404, 'not found');
+    return;
+  }
+
+  if (channelSecret === null) {
+    respond(res, 503, 'webhook intake is not configured');
     return;
   }
 
@@ -177,6 +204,67 @@ async function handleRequest(
   }
 }
 
+/**
+ * Accepts a notification relayed from a phone.
+ *
+ * This is the path that reads a personal chat without sending a read receipt:
+ * the message is captured from the Android notification as the OS posts it,
+ * so nothing ever reaches LINE's servers to mark it read.
+ *
+ * Authenticated with a bearer token rather than an HMAC signature, because
+ * the clients are phone automation apps whose HTTP actions can set a header
+ * but cannot compute a signature. That makes TLS non-optional: without it the
+ * token is on the wire in the clear.
+ */
+async function handleNotification(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: PipelineContext,
+): Promise<void> {
+  const secret = process.env.LINE_CONNECTOR_NOTIFY_SECRET?.trim();
+  if (!secret) {
+    respond(res, 503, 'notification relay is not configured');
+    return;
+  }
+
+  const header = req.headers.authorization;
+  const presented = typeof header === 'string' ? header.replace(/^Bearer\s+/i, '') : '';
+  if (!safeEqual(presented, secret)) {
+    console.warn('[notify] rejected a request with a bad token');
+    respond(res, 401, 'unauthorized');
+    return;
+  }
+
+  let rawBody: Buffer;
+  try {
+    rawBody = await readBody(req);
+  } catch (err) {
+    respond(res, 413, (err as Error).message);
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    respond(res, 400, 'invalid json');
+    return;
+  }
+
+  const result = normalizeNotification(parsed);
+  if (!result.ok) {
+    // A 200 with a reason: the relay forwards every notification on the
+    // device, and a non-LINE one being ignored is normal, not a failure the
+    // phone should retry or alert on.
+    respond(res, 200, JSON.stringify({ stored: false, reason: result.reason }), 'application/json');
+    return;
+  }
+
+  const { outcome } = processNotification(result.message, ctx);
+  console.log(`[notify] ${outcome}`);
+  respond(res, 200, JSON.stringify({ stored: outcome === 'stored' }), 'application/json');
+}
+
 /** Reads the request body, refusing anything oversized. */
 function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -207,7 +295,7 @@ function respond(res: ServerResponse, status: number, body: string, contentType 
   res.end(body);
 }
 
-function printPolicySummary(config: PrivacyConfig): void {
+function printPolicySummary(config: PrivacyConfig, opts: { notifyEnabled: boolean }): void {
   const { capture, retention } = config;
   const scope =
     capture.mode === 'denyByDefault'
@@ -216,15 +304,23 @@ function printPolicySummary(config: PrivacyConfig): void {
 
   console.log(
     [
-      `[policy] capture: ${capture.enabled ? 'on' : 'OFF (kill switch)'}, scope: ${scope}`,
+      `[policy] capture: ${capture.enabled ? 'on' : 'OFF (kill switch)'}, webhook scope: ${scope}`,
       `[policy] message text: ${capture.storeText}, media: ${capture.storeMedia ? 'stored' : 'not stored'}, location: ${capture.storeLocation}`,
       `[policy] retention: ${retention.days === 0 ? 'indefinite' : `${retention.days} days`}, sweep every ${retention.sweepIntervalMinutes} min`,
     ].join('\n'),
   );
 
-  if (capture.mode === 'denyByDefault' && capture.allow.length === 0) {
+  // The allow list gates webhook traffic only. Relayed notifications are the
+  // operator's own device and bypass it, so the "nothing allow-listed" warning
+  // is only true when the webhook is the sole intake.
+  if (capture.mode === 'denyByDefault' && capture.allow.length === 0 && !opts.notifyEnabled) {
     console.warn(
-      '[policy] nothing is allow-listed, so no messages will be stored. Add conversation ids with `npm run cli -- allow <id>`.',
+      '[policy] nothing is allow-listed, so no webhook messages will be stored. Add conversation ids with `npm run cli -- allow <id>`.',
+    );
+  }
+  if (opts.notifyEnabled) {
+    console.log(
+      '[policy] notification relay bypasses the allow list (it is your own device); the deny list and kill switch still apply.',
     );
   }
 }

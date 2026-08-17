@@ -108,7 +108,11 @@ function senderLabel(
   config: PrivacyConfig,
   conversation: ConversationRow | null,
 ): string {
-  if (message.direction === 'outbound') return 'you (Official Account)';
+  if (message.direction === 'outbound') {
+    // An imported personal chat has no Official Account behind it — the
+    // outbound side is just the person who exported the file.
+    return message.meta.source === 'export' ? 'you' : 'you (Official Account)';
+  }
 
   if (config.mcp.exposeSenderIds && message.senderLineId !== null) return message.senderLineId;
 
