@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# ---------------------------------------------------------------------------
+# Privacy-critical: never commit any of the following.
+# The data store holds real message content; the key file decrypts it.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+*.key
+secrets/
+config/privacy.json
+
+# Media downloaded from LINE
+media/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

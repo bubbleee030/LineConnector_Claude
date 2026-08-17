@@ -1,0 +1,31 @@
+{
+  "name": "line-connector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Privacy-first LINE Official Account connector for Claude (MCP server + webhook ingest)",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "bin": {
+    "line-connector-mcp": "./dist/src/mcp/server.js",
+    "line-connector": "./dist/src/cli/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "ingest": "node dist/src/ingest/server.js",
+    "mcp": "node dist/src/mcp/server.js",
+    "cli": "node dist/src/cli/main.js",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0"
+  }
+}

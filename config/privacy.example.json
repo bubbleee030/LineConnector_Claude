@@ -1,0 +1,45 @@
+{
+  "capture": {
+    "enabled": true,
+    "mode": "denyByDefault",
+    "allow": [],
+    "deny": [],
+    "storeText": "redacted",
+    "storeMedia": false,
+    "storeLocation": "none",
+    "storeFileNames": false,
+    "resolveDisplayNames": false,
+    "storeOutbound": true
+  },
+  "redaction": {
+    "rules": {
+      "secret": true,
+      "creditCard": true,
+      "twNationalId": true,
+      "jpMyNumber": false,
+      "iban": true,
+      "email": true,
+      "phone": true,
+      "urlQuery": true,
+      "lineId": true
+    },
+    "custom": []
+  },
+  "retention": {
+    "days": 30,
+    "sweepIntervalMinutes": 60,
+    "perConversationDays": {}
+  },
+  "mcp": {
+    "readable": null,
+    "maxMessagesPerCall": 100,
+    "maxCharsPerCall": 20000,
+    "defaultLookbackDays": 30,
+    "allowSend": false,
+    "exposeSenderIds": false
+  },
+  "audit": {
+    "enabled": true,
+    "retentionDays": 90
+  }
+}
