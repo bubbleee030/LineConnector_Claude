@@ -82,20 +82,22 @@ npm run cli -- conversations
 npm run cli -- export "<the handle it shows>"
 ```
 
-## Windows relay sketch (PowerShell)
+## Platform relays
 
-A minimal poller using the WinRT `UserNotificationListener`. Run it alongside
-the LINE Windows app. This is a starting point, not a packaged tool.
+| Platform | Script | How to run |
+|---|---|---|
+| macOS | [`scripts/relay/macos-relay.py`](../scripts/relay/macos-relay.py) | `python3 macos-relay.py` (uses stdlib only) |
+| Windows | [`scripts/relay/windows-relay.ps1`](../scripts/relay/windows-relay.ps1) | `.\windows-relay.ps1` (PowerShell 5.1+) |
+| Android | No script needed | MacroDroid / Tasker / Automate — see `setup-relay` |
 
-```powershell
-# Requires Windows 10+ and one-time consent via RequestAccessAsync.
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-$secret = $env:LINE_CONNECTOR_NOTIFY_SECRET
-$listener = [Windows.UI.Notifications.Management.UserNotificationListener,Windows.UI.Notifications.Management,ContentType=WindowsRuntime]::Current
-# ... RequestAccessAsync(), then poll GetNotificationsAsync(Toast),
-#     read each notification's title/body, and POST to /notify.
+Both scripts track which notifications they have already forwarded, so a
+restart does not re-send history. Set `LINE_CONNECTOR_NOTIFY_SECRET` and
+`LINE_CONNECTOR_NOTIFY_URL` in the environment, then run the script. Add
+`--once --verbose` (macOS) or `-Once -Verbose` (Windows) first to verify it
+reads your notifications.
+
+The quickest way to get the environment variables and exact commands:
+
+```bash
+npm run cli -- setup-relay --url https://your-host
 ```
-
-The full version is about 100 lines; the load-bearing parts are the one-time
-access request and reading each notification's `Text` elements. A C#/.NET tray
-app is the more robust form of the same thing.

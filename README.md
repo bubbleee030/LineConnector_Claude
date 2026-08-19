@@ -235,6 +235,7 @@ npm run cli -- <command>
 
   init                 Generate a key and a starter privacy config
   keygen               Print a fresh encryption key
+  setup-relay          Set up the notification relay for personal chats
 
   conversations        List captured conversations with their real LINE ids
   allow <lineId>       Add a conversation to the capture allow list

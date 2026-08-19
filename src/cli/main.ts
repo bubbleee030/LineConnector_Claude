@@ -67,6 +67,8 @@ function main(): void {
       return cmdAudit(args[0]);
     case 'export':
       return cmdExport(args[0]);
+    case 'setup-relay':
+      return cmdSetupRelay(args);
     case 'help':
     case '--help':
     case undefined:
@@ -85,6 +87,7 @@ function usage(): void {
 Setup
   init                 Generate an encryption key and a starter privacy config
   keygen               Print a fresh encryption key and exit
+  setup-relay          Set up the notification relay for personal chats
 
 Consent
   conversations        List captured conversations with their real LINE ids
@@ -106,6 +109,10 @@ Import options
   --retain-days <n>    Retention for this chat. Defaults to 0 (keep forever),
                        because imported history is usually older than the
                        global retention window and would be purged at once.
+
+Relay options
+  --url <host>         Server URL (e.g. https://myhost.example.com)
+  --all                Show instructions for all platforms
 
 Conversation ids look like U or C followed by 32 hex characters. Find them with
 \`conversations\`, or in the LINE Developers console.`,
@@ -144,7 +151,122 @@ Next steps:
   3. Point your Official Account's webhook URL at it (HTTPS, publicly reachable).
   4. Allow-list the conversations you want captured:  npm run cli -- allow <lineId>
 
-Nothing is recorded until step 4 — the default policy denies every conversation.`,
+Nothing is recorded until step 4 — the default policy denies every conversation.
+
+For personal chats (not just the Official Account), run:
+  npm run cli -- setup-relay
+
+It sets up a notification relay so Claude can read your messages without
+sending read receipts — works on Android, macOS, Windows, and iOS via Mac.`,
+  );
+}
+
+function cmdSetupRelay(args: string[]): void {
+  const existing = process.env.LINE_CONNECTOR_NOTIFY_SECRET?.trim();
+  const secret = existing || generateKeyHex();
+  const urlFlag = args.indexOf('--url');
+  const serverUrl = urlFlag !== -1 && args[urlFlag + 1]
+    ? args[urlFlag + 1] as string
+    : '<your-server>';
+
+  const notifyUrl = serverUrl.startsWith('http')
+    ? `${serverUrl.replace(/\/+$/, '')}/notify`
+    : `https://${serverUrl}/notify`;
+
+  if (existing) {
+    console.log('Using existing LINE_CONNECTOR_NOTIFY_SECRET from environment.\n');
+  } else {
+    console.log('Generated a new relay secret:\n');
+    console.log(`  ${secret}\n`);
+    console.log('Add this to the ingest server\'s environment and restart it:\n');
+    console.log(`  export LINE_CONNECTOR_NOTIFY_SECRET=${secret}\n`);
+  }
+
+  const platform = process.platform;
+  const allPlatforms = args.includes('--all');
+  const show = (p: string) => allPlatforms || platform === p;
+
+  if (!allPlatforms && platform === 'linux') {
+    console.log(
+      'This machine is Linux — the ingest server runs here, but the relay\n' +
+      'runs on the device where you receive LINE notifications.\n' +
+      'Showing instructions for all platforms:\n',
+    );
+  }
+
+  const showAll = allPlatforms || platform === 'linux';
+
+  // ---- Android ----
+  if (showAll || platform === 'android') {
+    console.log(
+      '── Android (recommended — easiest, most reliable) ──\n\n' +
+      '  Install MacroDroid (free on Play Store), then create a macro:\n\n' +
+      '  Trigger:  Notification Received → application LINE\n' +
+      '  Action:   HTTP Request (POST)\n' +
+      `    URL:    ${notifyUrl}\n` +
+      '    Headers:\n' +
+      `      Authorization: Bearer ${secret}\n` +
+      '      Content-Type: application/json\n' +
+      '    Body:\n' +
+      '      {"app":"jp.naver.line.android","chat":"{notification_title}",\n' +
+      '       "text":"{notification_text}","postedAt":{trigger_time}}\n\n' +
+      '  Grant MacroDroid notification access when prompted.\n' +
+      '  Tasker and Automate (LlamaLab) work the same way.\n',
+    );
+  }
+
+  // ---- macOS ----
+  if (showAll || platform === 'darwin') {
+    console.log(
+      '── macOS ──\n\n' +
+      '  Requirement: Full Disk Access for Terminal\n' +
+      '  (System Settings → Privacy & Security → Full Disk Access)\n\n' +
+      `  export LINE_CONNECTOR_NOTIFY_SECRET=${secret}\n` +
+      `  export LINE_CONNECTOR_NOTIFY_URL=${notifyUrl}\n` +
+      '  python3 scripts/relay/macos-relay.py\n\n' +
+      '  Run with --once --verbose first to verify it reads notifications.\n\n' +
+      '  The relay also captures iPhone notifications if you have an iPhone\n' +
+      '  on the same Apple ID with notification mirroring enabled.\n',
+    );
+  }
+
+  // ---- Windows ----
+  if (showAll || platform === 'win32') {
+    console.log(
+      '── Windows ──\n\n' +
+      '  Requirement: Windows 10 1709+, LINE desktop app running\n\n' +
+      `  $env:LINE_CONNECTOR_NOTIFY_SECRET = "${secret}"\n` +
+      `  $env:LINE_CONNECTOR_NOTIFY_URL = "${notifyUrl}"\n` +
+      '  .\\scripts\\relay\\windows-relay.ps1\n\n' +
+      '  Run with -Once -Verbose first to verify it reads notifications.\n' +
+      '  First run prompts for notification access — grant it in\n' +
+      '  Settings → Privacy → Notifications.\n',
+    );
+  }
+
+  // ---- iOS ----
+  if (showAll) {
+    console.log(
+      '── iOS ──\n\n' +
+      '  iOS cannot read other apps\' notifications directly (Apple sandbox).\n' +
+      '  Mirror your iPhone to a Mac, then use the macOS relay above.\n' +
+      '  (Same Apple ID, Settings → Notifications → iPhone notification mirroring.)\n\n' +
+      '  For specific threads without a Mac, use LINE\'s export:\n' +
+      '    npm run cli -- import ~/Downloads/chat.txt --me "Your Name"\n',
+    );
+  }
+
+  console.log(
+    '── How it works ──\n\n' +
+    '  The relay reads notifications your OS already delivered — it never\n' +
+    '  contacts LINE, never opens the chat, never sends a read receipt.\n' +
+    '  Messages arrive as previews (long texts truncate, media shows as\n' +
+    '  [Photo]). For the full text of a specific thread, use the import\n' +
+    '  command after an export from LINE.\n\n' +
+    '  The ingest server must be reachable over HTTPS from your device.\n' +
+    '  For local development, put a tunnel in front of it:\n' +
+    '    npm run ingest\n' +
+    '    cloudflared tunnel --url http://localhost:8787\n',
   );
 }
 
